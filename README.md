@@ -1,5 +1,7 @@
 # Suporte Provedor — API
 
+[![CI](https://github.com/Marestoni/suporte-provedor-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Marestoni/suporte-provedor-api/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 API em .NET 10 de um **agente de suporte com IA para provedores de internet pequenos**. O cliente abre o chat pelo site
 (o WhatsApp serve só de porta de entrada, com uma resposta automática contendo o link), se identifica e conversa com um
 agente que consulta os sistemas do provedor por **ferramentas (tool use)**: segunda via, diagnóstico da conexão,
