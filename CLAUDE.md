@@ -22,7 +22,9 @@ ASPNETCORE_ENVIRONMENT=Development ASPNETCORE_URLS=http://localhost:5180 dotnet 
   (`Anthropic:ApiKey`) ou `fake` (modelo roteirizado por palavra-chave, sem chave). Testado com o modelo real via OpenRouter.
 - Segredos: user-secrets **ou** `src/SuporteProvedor.Api/appsettings.Local.json` (no `.gitignore`). O Visual Studio desta
   máquina não lê os user-secrets, por isso o arquivo local existe. **Repositório público: nunca commitar chaves/senhas.**
-- Testes: `dotnet test` (regra do desbloqueio em confiança e adaptador do OpenRouter).
+- Testes: `dotnet test` (unitários). Testes de integração (banco temporário) só rodam com `SUPORTE_TEST_PG` definido; sem ela são pulados.
+- Proxy: `Proxy:ProxiesConhecidos` (preferido) ou `Proxy:ConfiarEmQualquerOrigem`; chave do hash de CPF em `Seguranca:ChaveHashCpf`.
+- Erros da API em ProblemDetails (`detail` = mensagem ao cliente); 409 = atendimento encerrado, 429 = ocupado/limite.
 - Cuidado no Windows/PowerShell 5.1: `Set-Content -Encoding utf8` grava BOM e `Get-Content` sem `-Encoding utf8` lê
   UTF-8 como ANSI (corrompe acentos). Edite arquivos com a ferramenta de edição, não com regex em PowerShell.
 
@@ -38,11 +40,12 @@ ASPNETCORE_ENVIRONMENT=Development ASPNETCORE_URLS=http://localhost:5180 dotnet 
 Schema mínimo, SQL-first, em `db/`:
 - `db/001_schema.sql` — cria as tabelas (idempotente: `IF NOT EXISTS`)
 - `db/002_seed.sql` — dados **fictícios** de teste
+- `db/003_tentativas_identificacao.sql`, `db/004_chamado_unico_ativo.sql` — migrations (limite de identificação; chamado ativo único)
 
 Recriar do zero:
 ```bash
 psql -U postgres -h localhost -c "DROP DATABASE IF EXISTS suporte_provedor" -c "CREATE DATABASE suporte_provedor ENCODING 'UTF8'"
-psql -U postgres -h localhost -d suporte_provedor -f db/001_schema.sql -f db/002_seed.sql
+for f in db/*.sql; do psql -U postgres -h localhost -d suporte_provedor -v ON_ERROR_STOP=1 -f "$f"; done
 ```
 
 Tabelas:
@@ -105,8 +108,9 @@ No MVP o chat **exige identificação antes** de qualquer mensagem (sem FAQ anô
 - **Identidade vem da sessão, nunca do modelo.** Toda ferramenta recebe o `cliente_id` do contexto da
   conversa autenticada; o modelo não passa (nem pode trocar) CPF/ID de cliente nos argumentos.
 - Sem token válido, não há conversa com o agente (401). Ferramentas só existem dentro de uma sessão identificada.
-- Identificação: CPF + data de nascimento; máx. 3 tentativas por conversa (`tentativas_identificacao`),
-  depois bloqueia a conversa. Mensagem de erro **genérica** (não revelar se o CPF existe).
+- Identificação: CPF + data de nascimento; máx. 3 tentativas por conversa (`conversas.tentativas_identificacao`) **e**
+  5 por CPF / 10 por IP em 15 min (tabela `tentativas_identificacao`, `PoliticaIdentificacao`) — o limite por conversa sozinho
+  é burlável criando conversas novas (achado da security-review). Mensagem de erro **genérica** (não revelar se o CPF existe).
 - **Regras de negócio no código, não no prompt.** Ex.: desbloqueio em confiança — 1 por mês, até 3 dias,
   só se `bloqueado_inadimplencia`. O modelo apenas pede; o código decide.
 - O modelo só executa **ações pré-definidas** (ferramentas). Nenhum comando livre em equipamento de rede.
@@ -138,9 +142,38 @@ dotnet user-secrets set "Anthropic:ApiKey" "..." --project src/SuporteProvedor.A
 5. Walled garden: liberar o domínio do chat para clientes bloqueados (Mikrotik/Radius, lado do provedor).
 6. Painel de atendente para conversas `transferida_humano`.
 
+## Checklist ANTES DE QUALQUER DEPLOY (obrigatório)
+Nenhum deploy (nem merge para a branch de produção) sem passar por todos os itens, nesta ordem. Quem for o agente/pessoa
+que vai publicar executa e **registra o resultado** (achados e correções) no PR ou no histórico do commit.
+
+1. **`/security-review`** — revisão de segurança das mudanças (identificação, sessão, IDOR nas ferramentas, PII, segredos, CORS/proxy).
+   Corrigir todo achado de severidade média ou alta antes de seguir.
+2. **`/code-review high`** — revisão de bugs (loop do agente, histórico, transações/concorrência, regras de negócio). **Repetir em loop**:
+   corrigir os achados, reexecutar, e só parar quando restarem apenas achados de baixa severidade (as 6 voltas já feitas convergiram assim:
+   10 → 10 → 9 → 7 → 5 → 2).
+3. **`/simplify`** — limpeza (reuso, duplicação, complexidade) nas mudanças, **depois** das correções dos itens 1 e 2.
+4. **`/run`** — subir API + site e exercitar os cenários de ponta a ponta (Ana, Bruno, Carla, Diego) no navegador, conferindo o fluxo real.
+5. **Testes e build verdes:** `dotnet build`, `dotnet test` com `SUPORTE_TEST_PG` definido (os de integração **não podem** ficar pulados),
+   e no site `npm run lint` + `npm run build`.
+6. **Segredos:** varrer o que vai para o git (`git diff --cached`) atrás de chaves/senhas; `appsettings.Local.json` e `.env.local` nunca
+   entram. Em produção configurar por variável de ambiente: `ConnectionStrings__Default`, chave do provedor de IA,
+   `Seguranca__ChaveHashCpf`, `Proxy__ProxiesConhecidos`, `Cors__Origins`. Chave que já apareceu em chat/log deve ser **revogada**.
+7. **Banco:** aplicar as migrations novas de `db/` em ordem no ambiente de destino antes de subir a nova versão da API.
+8. **Documentação:** atualizar README, `docs/DATABASE.md` e este arquivo (seção "Já feito" e "Pendências") com o que mudou.
+
+Repositório público: mesmo para portfólio, nada de dados reais de clientes nem credenciais, em nenhum commit (o histórico é público).
+
+## Já feito (revisões security-review + code-review, 6 voltas)
+- Limite de identificação por (CPF, IP) / IP / CPF em janela de 15 min, CPF com HMAC, IPv6 agrupado em /64, tentativa bloqueada não conta.
+- Loop do agente robusto: histórico saneado e limitado, par `tool_use`/`tool_result` sempre fechado (transação), tool_use truncado não executa,
+  turno vazio não é gravado, uma requisição por conversa (429), efeitos das ferramentas concluem mesmo se o cliente desconectar.
+- Desbloqueio em confiança atômico (`FOR UPDATE`) e com expiração (situação efetiva `liberado_em_confianca`); chamado idempotente por cliente.
+- Erros em ProblemDetails (400 para JSON inválido); datas em horário de Brasília; retenção horária de tentativas e conversas anônimas.
+- Testes: unitários + integração (banco temporário, `SUPORTE_TEST_PG`) cobrindo lockout, desbloqueio, chamado e loop do agente.
+
 ## Pendências
-- Testar com o modelo real da Anthropic (chave) e ajustar o system prompt (`Application/Agent/Prompts.cs`).
-- Testes do fluxo do agente com `IAgentModel` falso; `BadHttpRequestException` hoje vira 500 (deveria ser 400).
-- Definir ERP real do provedor e confirmar o que a API dele oferece.
-- Domínio do chat e provedor de hospedagem (hoje tudo local).
-- Política de retenção de conversas (LGPD).
+- Ajustar o system prompt (`Application/Agent/Prompts.cs`) com conversas reais; testar mais cenários com o modelo pago (Haiku) — só o gratuito foi usado.
+- Definir ERP real do provedor e confirmar o que a API dele oferece; extrair ports/adapters (hoje `AgentTools` chama `Db` direto).
+- Domínio do chat e provedor de hospedagem (hoje tudo local); configurar `Seguranca:ChaveHashCpf` e `Proxy:ProxiesConhecidos` em produção.
+- Lock por conversa é em memória (1 instância); com várias instâncias trocar por advisory lock do Postgres.
+- Política de retenção de conversas identificadas (LGPD) — hoje só as anônimas e as tentativas são apagadas.

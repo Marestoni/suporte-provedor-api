@@ -21,6 +21,11 @@ public record Chamado(long Id, string Protocolo, DateTime CriadoEm);
 public record ConversaInfo(
     Guid Id, long? ClienteId, string Status, int TentativasIdentificacao, string? TokenHash);
 
+public record TentativaIdentificacao(long Id, long PorCpfEIp, long PorIp, long PorCpf);
+
+/// <summary>Resultado de abrir chamado; JaExistia = já havia chamado aberto nesta conversa (idempotência).</summary>
+public record ResultadoChamado(Chamado Chamado, bool JaExistia);
+
 public record MensagemRegistro(string Papel, string? Conteudo, string? Payload);
 
 /// <summary>Resultado do pedido de desbloqueio em confiança (regra decidida em código).</summary>

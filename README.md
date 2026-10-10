@@ -48,7 +48,16 @@ system prompt: [`Prompts.cs`](src/SuporteProvedor.Api/Application/Agent/Prompts.
 
 ## Segurança
 
-- Identificação por CPF + data de nascimento, máx. 3 tentativas por conversa, com erro **genérico** (não revela se o CPF existe).
+- Identificação por CPF + data de nascimento com erro **genérico** (não revela se o CPF existe). Limite em janela de 15 min
+  por (CPF, IP) = 5, por IP = 60 (alto de propósito: CGNAT) e por CPF = 30, mais 3 por conversa; criar conversas novas não zera o contador (impede força
+  bruta da data de nascimento; IPv6 agrupado em /64) e um terceiro não consegue travar o dono do CPF a partir de um único IP.
+- Uma requisição por vez por conversa (429 se houver outra em andamento; 409 = atendimento encerrado) e histórico saneado antes de ir ao modelo
+  (sem turnos vazios nem `tool_use` sem resultado), limitado às últimas 40 mensagens.
+- Atrás de proxy, configure `Proxy:ProxiesConhecidos` (IPs ou CIDR do proxy) para o limite por IP usar o IP real sem aceitar
+  `X-Forwarded-For` forjado. `Proxy:ConfiarEmQualquerOrigem` existe, mas só é seguro se a API for inalcançável sem o proxy.
+- CPF nas tentativas de identificação guardado como **HMAC-SHA256** com segredo do servidor (`Seguranca:ChaveHashCpf`).
+- Retenção automática: tentativas com mais de 1 dia e conversas nunca identificadas são apagadas de hora em hora.
+- Erros no formato **ProblemDetails** (RFC 7807); datas mostradas ao cliente em horário de Brasília.
 - Token de sessão aleatório de 256 bits; só o **SHA-256** é salvo; comparação em tempo constante.
 - Rate limit por IP, CORS restrito à origem do site, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
 - Limite de tamanho de mensagem e de iterações do loop do agente.
@@ -87,7 +96,7 @@ Requisitos: .NET 10 SDK e PostgreSQL.
 ```bash
 # 1. banco
 psql -U postgres -c "CREATE DATABASE suporte_provedor ENCODING 'UTF8'"
-psql -U postgres -d suporte_provedor -f db/001_schema.sql -f db/002_seed.sql
+for f in db/*.sql; do psql -U postgres -d suporte_provedor -v ON_ERROR_STOP=1 -f "$f"; done   # 001 schema, 002 seed, 003 e 004 migrations
 
 # 2. segredos locais (nunca commitar)
 cd src/SuporteProvedor.Api
@@ -110,7 +119,15 @@ Clientes de teste (fictícios), um cenário cada:
 | Carla Dias | 39053344705 | 1992-11-02 | online com sinal óptico ruim |
 | Diego Rocha | 11122233396 | 1978-01-30 | offline, queda geral no bairro |
 
-Testes: `dotnet test`.
+Testes: `dotnet test` roda os testes unitários. Os de **integração** (desbloqueio atômico, chamado idempotente, loop do agente com modelo
+roteirizado) usam um PostgreSQL real e criam/apagam um banco temporário; para habilitá-los defina uma connection string administrativa:
+
+```bash
+export SUPORTE_TEST_PG="Host=localhost;Username=postgres;Password=<sua-senha>;Database=postgres"
+dotnet test
+```
+
+Sem a variável eles são pulados.
 
 ## Roadmap
 

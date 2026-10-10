@@ -141,6 +141,8 @@ public class OpenRouterModel(HttpClient http, IOptions<OpenRouterOptions> opt, I
                 });
             }
 
-        return new ModelTurn(content, temCalls ? "tool_use" : (finishReason == "length" ? "max_tokens" : "end_turn"));
+        // finish_reason "length" = cortado por max_tokens (inclusive no meio de tool_calls): não tratar como tool_use válido.
+        var stop = finishReason == "length" ? "max_tokens" : temCalls ? "tool_use" : "end_turn";
+        return new ModelTurn(content, stop);
     }
 }

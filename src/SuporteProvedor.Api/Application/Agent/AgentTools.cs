@@ -117,7 +117,7 @@ public class AgentTools(Db db, ILogger<AgentTools> log)
         return new
         {
             situacao_contrato = ctx.Cliente.Situacao, online = c.Online,
-            ultimo_login = c.UltimoLogin?.ToLocalTime().ToString("dd/MM/yyyy HH:mm"),
+            ultimo_login = c.UltimoLogin is { } ul ? FusoBrasil.Formatar(ul, "dd/MM/yyyy HH:mm") : null,
             onu_status = c.OnuStatus, sinal_onu_dbm = c.SinalOnuDbm,
         };
     }
@@ -129,30 +129,27 @@ public class AgentTools(Db db, ILogger<AgentTools> log)
         return new
         {
             incidente_aberto = true, titulo = i.Titulo, descricao = i.Descricao,
-            previsao = i.PrevisaoEm?.ToLocalTime().ToString("dd/MM/yyyy HH:mm"),
+            previsao = i.PrevisaoEm is { } pv ? FusoBrasil.Formatar(pv, "dd/MM/yyyy HH:mm") : null,
         };
     }
 
     private async Task<object> Desbloqueio(ToolContext ctx, CancellationToken ct)
     {
-        var ultimo = await db.UltimoDesbloqueioAsync(ctx.Cliente.Id, ct);
-        var r = RegrasDesbloqueio.Avaliar(ctx.Cliente.Situacao, ultimo, DateTimeOffset.UtcNow);
+        // Regra + registro numa transação (db), para pedidos simultâneos não furarem o limite.
+        var r = await db.TentarDesbloqueioAsync(ctx.Cliente.Id, ctx.ConversaId, DateTimeOffset.UtcNow, ct);
         if (r.Liberado)
-        {
-            await db.RegistrarDesbloqueioAsync(ctx.Cliente.Id, ctx.ConversaId, r.LiberadoAte!.Value, ct);
-            ctx.Cliente = ctx.Cliente with { Situacao = "ativo" };
-        }
-        return new { liberado = r.Liberado, motivo = r.Motivo, liberado_ate = r.LiberadoAte?.ToLocalTime().ToString("dd/MM/yyyy") };
+            ctx.Cliente = ctx.Cliente with { Situacao = "liberado_em_confianca" };
+        return new { liberado = r.Liberado, motivo = r.Motivo, liberado_ate = r.LiberadoAte is { } ate ? FusoBrasil.Formatar(ate, "dd/MM/yyyy") : null };
     }
 
     private async Task<object> AbrirChamado(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var descricao = input["descricao"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(descricao)) return new { erro = "descricao é obrigatória." };
-        var ch = await db.CriarChamadoAsync(ctx.Cliente.Id, ctx.ConversaId, "visita_tecnica",
+        var r = await db.CriarChamadoAsync(ctx.Cliente.Id, ctx.ConversaId, "visita_tecnica",
             descricao, input["diagnostico"]?.GetValue<string>(), ct);
-        ctx.ProtocoloChamado = ch.Protocolo;
-        return new { aberto = true, protocolo = ch.Protocolo };
+        ctx.ProtocoloChamado = r.Chamado.Protocolo;
+        return new { aberto = true, protocolo = r.Chamado.Protocolo, ja_existia = r.JaExistia };
     }
 
     private async Task<object> Transferir(ToolContext ctx, CancellationToken ct)

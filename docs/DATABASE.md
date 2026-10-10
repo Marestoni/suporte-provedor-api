@@ -12,14 +12,17 @@ Não há ferramenta de migration automática no MVP. Os scripts em `db/` **são*
 | `db/001_schema.sql` | Cria as 8 tabelas, constraints e índices. Idempotente (`IF NOT EXISTS`). |
 | `db/002_seed.sql` | Dados **fictícios** de desenvolvimento (4 clientes, um cenário de teste cada). Idempotente (`ON CONFLICT DO NOTHING`). |
 
-Alterações futuras entram como novos arquivos (`003_...sql`, `004_...sql`), nunca editando um script já aplicado em outro ambiente.
+| `db/003_tentativas_identificacao.sql` | Tabela `tentativas_identificacao` (limite de tentativas por CPF e por IP). |
+| `db/004_chamado_unico_ativo.sql` | Índice único parcial: no máximo 1 chamado ativo (`aberto`/`agendado`) por cliente e tipo. |
+
+Alterações futuras entram como novos arquivos (`005_...sql`, `006_...sql`), nunca editando um script já aplicado em outro ambiente.
 Quando o projeto crescer, os mesmos arquivos migram para uma ferramenta (DbUp, Flyway ou EF Core Migrations) sem mudar o schema.
 
 Criar do zero (defina `PGPASSWORD` ou use o `.pgpass`):
 
 ```bash
 psql -U postgres -h localhost -c "CREATE DATABASE suporte_provedor ENCODING 'UTF8'"
-psql -U postgres -h localhost -d suporte_provedor -f db/001_schema.sql -f db/002_seed.sql
+for f in db/*.sql; do psql -U postgres -h localhost -d suporte_provedor -v ON_ERROR_STOP=1 -f "$f"; done
 ```
 
 ## Modelo
@@ -37,6 +40,7 @@ erDiagram
     clientes ||--o{ conversas : abre
     clientes ||--o{ chamados : solicita
     clientes ||--o{ desbloqueios_confianca : recebe
+    tentativas_identificacao }o..o{ clientes : "cpf_hash = sha256(cpf)"
     conversas ||--o{ mensagens : contem
     conversas ||--o{ chamados : origina
     conversas ||--o{ desbloqueios_confianca : origina
@@ -89,6 +93,12 @@ erDiagram
         int tentativas_identificacao
         text token_hash "SHA-256 do token de sessao"
     }
+    tentativas_identificacao {
+        bigint id PK
+        char64 cpf_hash "SHA-256 do CPF"
+        inet ip
+        timestamptz criado_em
+    }
     mensagens {
         bigint id PK
         uuid conversa_id FK
@@ -138,17 +148,29 @@ e **não** abre chamado.
 Uma por atendimento. Nasce anônima (`cliente_id` nulo) e é vinculada ao cliente ao identificar. Guarda só o
 **hash** do token de sessão (`token_hash`), nunca o token. `tentativas_identificacao` limita a 3 tentativas.
 
+### `tentativas_identificacao`
+Uma linha por tentativa de identificação, com o IP agrupado em /64 quando IPv6 (um assinante recebe um /64 inteiro) e o CPF guardado só como HMAC-SHA256 (segredo `Seguranca:ChaveHashCpf`) e o IP.
+Tentativas bloqueadas não são contadas (senão o bloqueio se prolongaria sozinho). Linhas com mais de 1 dia são apagadas por
+uma rotina horária (`LimpezaService`), que também remove conversas nunca identificadas com mais de 1 dia. Alimenta o limite em janela de 15
+minutos (`PoliticaIdentificacao`), que não é zerado ao criar uma conversa nova: **5 por (CPF, IP)**, **60 por IP** (alto por causa de CGNAT: muitos assinantes dividem um IP público) e **30 por
+CPF**. O limite por par impede um IP de martelar um CPF sem travar o dono dele em outro IP; o teto por CPF limita ataque
+distribuído. A tentativa é gravada *antes* de validar (requisições paralelas não escapam) e removida se a identificação der
+certo. O hash com chave é pseudonimização: sem o segredo não dá para reverter o CPF por força bruta.
+
 ### `mensagens`
 Histórico completo e auditoria. `payload` (jsonb) guarda os blocos da Messages API (texto, `tool_use`, `tool_result`),
 o que permite reconstruir o contexto do modelo a cada turno. Índice `(conversa_id, id)`.
 
 ### `chamados`
 Saída da ferramenta `abrir_chamado`. `diagnostico` registra o que o agente já verificou e tentou, para o técnico
-não repetir o roteiro. `protocolo` é único (formato `CH-yyMMdd-NNNN`).
+não repetir o roteiro. `protocolo` é único (formato `CH-yyMMdd-NNNN`). Abrir chamado é **idempotente por cliente e tipo**: se já há um chamado ativo (`aberto` ou `agendado`), a ferramenta devolve o mesmo protocolo e **anexa ao `diagnostico` a informação nova** da conversa (sem repetir a mesma nota). A garantia vem do banco: índice único parcial `ux_chamados_ativo_cliente_tipo` (migration 004), então duas conversas simultâneas do mesmo cliente não geram dois chamados.
 
 ### `desbloqueios_confianca`
 Histórico do desbloqueio temporário. A regra (1 por mês, até 3 dias, só para `bloqueado_inadimplencia`) é aplicada
 **em código** (`RegrasDesbloqueio`, com testes), não no banco nem no prompt; a tabela é a evidência para a regra de 30 dias.
+A avaliação e o registro ocorrem numa única transação com `SELECT ... FOR UPDATE` no cliente, então pedidos simultâneos
+não furam o limite. `clientes.situacao` **não é alterada**: enquanto `liberado_ate > now()` a situação *efetiva* devolvida
+pela API é `liberado_em_confianca`, e ao expirar volta sozinha a `bloqueado_inadimplencia` (sem job de re-bloqueio).
 
 ## Decisões
 
