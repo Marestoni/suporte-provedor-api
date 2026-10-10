@@ -136,3 +136,7 @@ Sem a variável eles são pulados.
 - Streaming (SSE) das respostas
 - *Walled garden*: manter o domínio do chat liberado para clientes bloqueados (Mikrotik/Radius)
 - Painel para atendentes (conversas `transferida_humano`)
+
+## Licença
+
+[MIT](LICENSE) © 2026 André Marestoni
