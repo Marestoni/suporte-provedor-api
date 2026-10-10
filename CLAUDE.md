@@ -153,9 +153,9 @@ que vai publicar executa e **registra o resultado** (achados e correções) no P
    10 → 10 → 9 → 7 → 5 → 2).
 3. **`/simplify`** — limpeza (reuso, duplicação, complexidade) nas mudanças, **depois** das correções dos itens 1 e 2.
 4. **`/run`** — subir API + site e exercitar os cenários de ponta a ponta (Ana, Bruno, Carla, Diego) no navegador, conferindo o fluxo real.
-5. **Testes e build verdes:** `dotnet build`, `dotnet test` com `SUPORTE_TEST_PG` definido (os de integração **não podem** ficar pulados),
+5. **Testes e build verdes** (o CI `.github/workflows/ci.yml` roda isso com PostgreSQL de verdade e **falha se algum teste for pulado**; o selo no README precisa estar verde): `dotnet build`, `dotnet test` com `SUPORTE_TEST_PG` definido (os de integração **não podem** ficar pulados),
    e no site `npm run lint` + `npm run build`.
-6. **Segredos:** varrer o que vai para o git (`git diff --cached`) atrás de chaves/senhas; `appsettings.Local.json` e `.env.local` nunca
+6. **Segredos:** varrer o que vai para o git (`git diff --cached`) atrás de chaves/senhas (o CI também roda **gitleaks** em todo o histórico a cada push — `.github/workflows/secrets-scan.yml`); `appsettings.Local.json` e `.env.local` nunca
    entram. Em produção configurar por variável de ambiente: `ConnectionStrings__Default`, chave do provedor de IA,
    `Seguranca__ChaveHashCpf`, `Proxy__ProxiesConhecidos`, `Cors__Origins`. Chave que já apareceu em chat/log deve ser **revogada**.
 7. **Banco:** aplicar as migrations novas de `db/` em ordem no ambiente de destino antes de subir a nova versão da API.
